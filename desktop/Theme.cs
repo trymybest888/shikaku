@@ -63,6 +63,26 @@ public class PillButton : Button {
         }else TextRenderer.DrawText(g,Text,Font,ClientRectangle,text,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter|TextFormatFlags.SingleLine);
     }
 }
+// Logo, wordmark and tagline measured and drawn with the same Graphics, so they line up at any DPI.
+public class BrandMark : Control {
+    public string Logo,Word,Tagline; public Font LogoFont,WordFont;
+    public BrandMark(){SetStyle(ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer|ControlStyles.ResizeRedraw,true);TabStop=false;}
+    protected override void OnPaint(PaintEventArgs e){
+        Graphics g=e.Graphics;g.Clear(Parent!=null?Parent.BackColor:Theme.Spine);g.TextRenderingHint=TextRenderingHint.AntiAliasGridFit;
+        using(var format=(StringFormat)StringFormat.GenericTypographic.Clone())using(var bright=new SolidBrush(Theme.SpineText))using(var dim=new SolidBrush(Theme.SpineMuted)){
+            format.FormatFlags|=StringFormatFlags.NoWrap;
+            SizeF logo=g.MeasureString(Logo,LogoFont,PointF.Empty,format),word=g.MeasureString(Word,WordFont,PointF.Empty,format);
+            float wordX=logo.Width+WordFont.GetHeight(g)*.45f;
+            // Shrink the wordmark rather than let it run past the spine.
+            float fit=Math.Min(1,(Width-wordX)/Math.Max(1,word.Width));
+            using(var wordFont=fit<1?new Font(WordFont.FontFamily,WordFont.Size*fit,WordFont.Style,WordFont.Unit):null){
+                Font used=wordFont??WordFont;word=g.MeasureString(Word,used,PointF.Empty,format);
+                g.DrawString(Logo,LogoFont,bright,0,0,format);g.DrawString(Word,used,bright,wordX,(logo.Height-word.Height)/2,format);
+            }
+            g.DrawString(Tagline,Font,dim,new RectangleF(1,logo.Height+Font.GetHeight(g)*.35f,Width,Height),format);
+        }
+    }
+}
 public class Meter : Control {
     int value,maximum=100; public Color Track=Theme.Line,Fill=Theme.Accent;
     public int Value {get{return value;}set{this.value=Math.Max(0,Math.Min(maximum,value));Invalidate();}}

@@ -152,10 +152,8 @@ public class GameWindow : Form {
         board=new BoardControl(puzzle);audio=CreateSound();player=new SoundPlayer(audio);player.Load();
         // The left spine holds the brand, the level picker and the player's progress, like the spine of a puzzle book.
         side.Dock=DockStyle.Left;side.Width=236;side.BackColor=Theme.Spine;Controls.Add(side);
-        Label mark=new Label{Text=Theme.SealFamily!=null?"四角":"▦",Font=new Font(Theme.SealFamily??Theme.UiFamily,20,FontStyle.Bold),ForeColor=Theme.SpineText,AutoSize=true,Location=new Point(14,16)};
-        Label brand=new Label{Text="Shikaku",Font=Theme.Ui(13,FontStyle.Bold),ForeColor=Theme.SpineText,AutoSize=true,Location=new Point(86,24)};
-        Label tagline=new Label{Text="ปริศนาแบ่งสี่เหลี่ยม",ForeColor=Theme.SpineMuted,AutoSize=true,Location=new Point(18,68)};
-        Label pick=new Label{Text="เลือกระดับ",ForeColor=Theme.SpineMuted,AutoSize=true,Location=new Point(20,116)};side.Controls.AddRange(new Control[]{mark,brand,tagline,pick});
+        BrandMark mark=new BrandMark{Logo=Theme.SealFamily!=null?"四角":"▦",Word="Shikaku",Tagline="ปริศนาแบ่งสี่เหลี่ยม",LogoFont=new Font(Theme.SealFamily??Theme.UiFamily,20,FontStyle.Bold),WordFont=Theme.Ui(13,FontStyle.Bold),Font=Theme.Ui(10)};mark.SetBounds(16,14,208,90);
+        Label pick=new Label{Text="เลือกระดับ",ForeColor=Theme.SpineMuted,AutoSize=true,Location=new Point(20,116)};side.Controls.AddRange(new Control[]{mark,pick});
         for(int i=0;i<5;i++){int choice=i;PillButton b=MakeButton(names[i],()=>RequestNewGame(choice),ButtonKind.Spine);b.Detail=sizes[i]+" × "+sizes[i];b.AutoSize=false;b.SetBounds(12,142+i*42,212,38);side.Controls.Add(b);levelButtons.Add(b);}
         dailyButton=MakeButton("โจทย์ประจำวัน",()=>RequestDaily(),ButtonKind.Spine);dailyButton.Detail="★";dailyButton.AutoSize=false;dailyButton.SetBounds(12,142+5*42+10,212,38);side.Controls.Add(dailyButton);
         rules=new Label{Text="ลากเพื่อวาดสี่เหลี่ยม\nแต่ละรูปต้องมีตัวเลขหนึ่งตัว\nและมีจำนวนช่องเท่ากับตัวเลข\nคลิกรูปเดิมเพื่อลบ\nคำใบ้ช่วยเติมให้ 1 รูป\n(กระดานนั้นไม่ได้ EXP)",ForeColor=Theme.SpineMuted,Location=new Point(20,418),Size=new Size(210,132)};side.Controls.Add(rules);
@@ -165,8 +163,7 @@ public class GameWindow : Form {
         profileExp.SetBounds(16,56,204,22);profileExp.ForeColor=Theme.SpineMuted;
         PillButton achievements=MakeButton("ดูสถิติและยศ",()=>ShowAchievements(),ButtonKind.Spine);achievements.Outlined=true;achievements.AutoSize=false;achievements.SetBounds(12,86,212,34);
         profile.Controls.AddRange(new Control[]{profileLevel,profileMeter,profileExp,achievements});
-        side.Resize+=(s,e)=>rules.Visible=rules.Bottom+8<=side.ClientSize.Height-profile.Height;
-        Shown+=(s,e)=>top.PerformLayout();
+        side.Resize+=(s,e)=>rules.Visible=rules.Bottom+8<=side.ClientSize.Height-profile.Height;        Shown+=(s,e)=>top.PerformLayout();
         content.Dock=DockStyle.Fill;content.Padding=new Padding(24,18,24,12);content.BackColor=Theme.Paper;Controls.Add(content);content.BringToFront();
         top.Dock=DockStyle.Top;top.Height=96;content.Controls.Add(top);
         title.SetBounds(0,0,420,40);title.Font=Theme.Ui(19,FontStyle.Bold);title.ForeColor=Ink;stats.SetBounds(0,46,420,24);stats.ForeColor=Muted;
