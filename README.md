@@ -2,6 +2,8 @@
 
 เกมปริศนา Shikaku สำหรับ Windows — ไฟล์เดียว ไม่ต้องติดตั้ง เล่นออฟไลน์ได้
 
+![หน้าจอเกม](docs/screenshot.png)
+
 ## เล่น
 
 ดาวน์โหลด `Shikaku.exe` จาก [Releases](https://github.com/trymybest888/shikaku/releases) แล้วเปิดได้เลย (ต้องมี .NET Framework 4.5+ ซึ่งมีใน Windows 10/11)
