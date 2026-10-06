@@ -1,6 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path -LiteralPath $compiler)) {
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+}
 $runner = Join-Path $PSScriptRoot 'Regression.exe'
 $sources = Get-ChildItem -LiteralPath (Join-Path $project 'desktop') -Filter '*.cs' | ForEach-Object { $_.FullName }
 $resources = @('novice','skilled','professional','divine') | ForEach-Object { "/resource:$(Join-Path $project ('assets\ranks\' + $_ + '.png')),Shikaku.Rank.$_" }

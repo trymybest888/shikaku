@@ -1,6 +1,7 @@
-﻿*.exe
+*.exe
 *.pdb
-tests/achievement-small.png
-tests/test-data-*/
 bin/
 obj/
+dist/
+tests/achievement-small.png
+tests/test-data-*/
