@@ -28,10 +28,14 @@ public class Puzzle {
     public List<RegionBox> Placed=new List<RegionBox>();
     public List<Rectangle> Solution=new List<Rectangle>();
     public Stack<List<RegionBox>> History=new Stack<List<RegionBox>>();
-    readonly Random random=new Random();
-    public void New(int size) {
+    Random random=new Random();
+    public void New(int size) {Create(size,null);}
+    // Daily puzzles run without time limits so every machine generates the same board from the same seed.
+    public void NewDaily(int size,int seed) {Create(size,new Random(seed));}
+    void Create(int size,Random seeded) {
         if(size<2||size>40)throw new ArgumentOutOfRangeException("size");
-        for(int retry=0;retry<8;retry++) { Generate(size); if(ValidateGenerated()){if(UniquePuzzle.Ensure(this)&&ValidateGenerated()&&Clues.All(c=>c.Value>=2))return;} }
+        if(seeded!=null)random=seeded;
+        for(int retry=0;retry<8;retry++) { Generate(size); if(ValidateGenerated()){if(UniquePuzzle.Ensure(this,random,seeded==null)&&ValidateGenerated()&&Clues.All(c=>c.Value>=2))return;} }
         throw new InvalidOperationException("ไม่สามารถสร้างโจทย์ที่ตรวจสอบคำตอบแล้วได้ กรุณาเริ่มเกมใหม่");
     }
     private void Generate(int size) {
@@ -80,6 +84,12 @@ public class Puzzle {
         // Keep the automatic fill in the same undo step as the player's last placement.
         Placed.Add(new RegionBox(last,Placed.Max(p=>p.Color)+1));return true;
     }
+    public bool Hint(int color) {
+        var missing=Solution.Where(s=>!Placed.Any(p=>p.Bounds==s)).ToList();if(missing.Count==0)return false;
+        // Prefer a region that also replaces one of the player's wrong rectangles.
+        Rectangle pick=missing.OrderByDescending(s=>Placed.Any(p=>!Valid(p.Bounds)&&p.Bounds.IntersectsWith(s))).ThenBy(s=>s.Width*s.Height).First();
+        Place(pick,color);return true;
+    }
     public int Covered { get {return Placed.Sum(r=>r.Bounds.Width*r.Bounds.Height);} }
     public bool Won { get {return Covered==Size*Size&&Placed.All(r=>Valid(r.Bounds));} }
 }
@@ -126,12 +136,12 @@ public class BoardControl : Control {
     }
 }
 public class GameWindow : Form {
-    readonly PlayerProgress playerProgress; readonly SessionStore session; readonly List<PendingReward> pending=new List<PendingReward>(); Guid gameId; bool rewardGranted; string rewardMessage="";
+    readonly PlayerProgress playerProgress; readonly SessionStore session; readonly List<PendingReward> pending=new List<PendingReward>(); Guid gameId; bool rewardGranted; string rewardMessage=""; string daily; int hints;
     readonly Puzzle puzzle=new Puzzle(); readonly string[] names={"Easy","Medium","Hard","Expert","Master"}; readonly int[] sizes={5,10,20,30,40};
     readonly Panel header=new Panel(),side=new Panel(),content=new Panel(),viewport=new Panel(),top=new Panel(),bottom=new Panel();
     readonly Label title=new Label(),stats=new Label(),clock=new Label(),status=new Label(),scaleLabel=new Label();
     readonly ProgressBar progress=new ProgressBar(); readonly FlowLayoutPanel views=new FlowLayoutPanel(),actions=new FlowLayoutPanel();
-    readonly List<Button> levelButtons=new List<Button>(); Button undo,minus,plus,sound,exitFull,retrySave;
+    readonly List<Button> levelButtons=new List<Button>(); Button undo,minus,plus,sound,exitFull,retrySave,dailyButton;
     readonly BoardControl board; readonly Timer timer=new Timer(); readonly SoundPlayer player; readonly MemoryStream audio;
     int level; float scale=1,previousScale=1; DateTime started; bool completed,soundOn=true,full,layingOut,initialized,generating,replaceLegacyMaster;long finishedSeconds;DateTime lastSave;
     FormBorderStyle oldBorder; FormWindowState oldState; Rectangle oldBounds;
@@ -145,7 +155,8 @@ public class GameWindow : Form {
         side.Dock=DockStyle.Left;side.Width=218;side.Padding=new Padding(16);side.AutoScroll=true;Controls.Add(side);
         Label label=new Label{Text="เลือกระดับความยาก",ForeColor=Muted,AutoSize=true,Location=new Point(16,14)};side.Controls.Add(label);
         for(int i=0;i<5;i++){int choice=i;Button b=MakeButton(names[i]+"     "+sizes[i]+" × "+sizes[i],()=>RequestNewGame(choice));b.SetBounds(16,48+i*48,184,40);side.Controls.Add(b);levelButtons.Add(b);}
-        Label rules=new Label{Text="วิธีเล่น\n\nลากเพื่อสร้างสี่เหลี่ยม\nแตะรูปเดิมเพื่อลบ\nลากทับเพื่อแทนที่\n\nแต่ละรูปต้องมีตัวเลขหนึ่งตัว\nและจำนวนช่องตรงกับตัวเลข\n\nกดตรวจคำตอบเพื่อดูรูปที่ผิด",ForeColor=Muted,Location=new Point(18,310),Size=new Size(185,260)};side.Controls.Add(rules);
+        dailyButton=MakeButton("★ โจทย์ประจำวัน",()=>RequestDaily());dailyButton.SetBounds(16,48+5*48+8,184,40);side.Controls.Add(dailyButton);
+        Label rules=new Label{Text="วิธีเล่น\n\nลากเพื่อสร้างสี่เหลี่ยม\nแตะรูปเดิมเพื่อลบ\nลากทับเพื่อแทนที่\n\nแต่ละรูปต้องมีตัวเลขหนึ่งตัว\nและจำนวนช่องตรงกับตัวเลข\n\nกดตรวจคำตอบเพื่อดูรูปที่ผิด\nคำใบ้เติมให้ 1 รูป (ไม่ได้ EXP)",ForeColor=Muted,Location=new Point(18,356),Size=new Size(185,280)};side.Controls.Add(rules);
         content.Dock=DockStyle.Fill;content.Padding=new Padding(12);content.BackColor=Color.White;Controls.Add(content);content.BringToFront();
         top.Dock=DockStyle.Top;top.Height=104;content.Controls.Add(top);
         title.SetBounds(0,0,300,30);title.Font=new Font("Segoe UI",17,FontStyle.Bold);stats.SetBounds(0,34,650,24);stats.ForeColor=Muted;clock.Font=new Font("Segoe UI",17,FontStyle.Bold);clock.ForeColor=Green;clock.TextAlign=ContentAlignment.MiddleRight;clock.SetBounds(700,0,120,36);clock.Anchor=AnchorStyles.Top|AnchorStyles.Right;top.Controls.AddRange(new Control[]{title,stats,clock});
@@ -158,7 +169,7 @@ public class GameWindow : Form {
         undo=MakeButton("↶ ย้อนกลับ",()=>{if(puzzle.History.Count>0){puzzle.Placed=puzzle.History.Pop();completed=false;board.ShowErrors=false;RefreshState();board.Invalidate();status.Text="ย้อนกลับแล้ว";}});
         sound=MakeButton("เสียง: เปิด",()=>{soundOn=!soundOn;sound.Text="เสียง: "+(soundOn?"เปิด":"ปิด");Persist();});
         retrySave=MakeButton("ลองบันทึกใหม่",()=>{Persist();RetryRewards();});
-        actions.Controls.AddRange(new Control[]{fresh,undo,MakeButton("ล้างกระดาน",()=>{if(puzzle.Placed.Count>0&&MessageBox.Show(this,"ล้างรูปที่วางทั้งหมดหรือไม่? ย้อนกลับได้", "ล้างกระดาน",MessageBoxButtons.YesNo,MessageBoxIcon.Question)==DialogResult.Yes){puzzle.Save();puzzle.Placed.Clear();completed=false;board.ShowErrors=false;board.Invalidate();RefreshState();}}),MakeButton("ตรวจคำตอบ",CheckAnswer),sound,retrySave});
+        actions.Controls.AddRange(new Control[]{fresh,undo,MakeButton("ล้างกระดาน",()=>{if(puzzle.Placed.Count>0&&MessageBox.Show(this,"ล้างรูปที่วางทั้งหมดหรือไม่? ย้อนกลับได้", "ล้างกระดาน",MessageBoxButtons.YesNo,MessageBoxIcon.Question)==DialogResult.Yes){puzzle.Save();puzzle.Placed.Clear();completed=false;board.ShowErrors=false;board.Invalidate();RefreshState();}}),MakeButton("ตรวจคำตอบ",CheckAnswer),MakeButton("✦ คำใบ้",UseHint),sound,retrySave});
         status.SetBounds(0,88,850,34);status.Anchor=AnchorStyles.Left|AnchorStyles.Right|AnchorStyles.Top;status.ForeColor=Muted;bottom.Controls.Add(status);
         viewport.Dock=DockStyle.Fill;viewport.BackColor=Color.FromArgb(234,240,233);viewport.AutoScroll=true;content.Controls.Add(viewport);viewport.BringToFront();viewport.Controls.Add(board);
         exitFull=MakeButton("ออกจากเต็มจอ · Esc",()=>ToggleFull());exitFull.Visible=false;viewport.Controls.Add(exitFull);
@@ -169,34 +180,48 @@ public class GameWindow : Form {
     Button MakeButton(string text,Action action){Button b=new Button{Text=text,AutoSize=true,Height=32,FlatStyle=FlatStyle.Flat,BackColor=Color.White,ForeColor=Green,Padding=new Padding(8,2,8,2),Margin=new Padding(0,0,7,0),Cursor=Cursors.Hand};b.FlatAppearance.BorderColor=Color.FromArgb(210,224,214);b.Click+=(s,e)=>action();return b;}
     string Elapsed(){TimeSpan t=TimeSpan.FromSeconds(completed?finishedSeconds:Math.Max(0,(DateTime.Now-started).TotalSeconds));return ((int)t.TotalMinutes).ToString("00")+":"+t.Seconds.ToString("00");}
     void NewGame(int chosen){var generated=new Puzzle();generated.New(sizes[chosen]);ApplyNewPuzzle(chosen,generated);}
-    void ApplyNewPuzzle(int chosen,Puzzle generated){initialized=false;gameId=Guid.NewGuid();rewardGranted=false;rewardMessage="";level=chosen;puzzle.Size=generated.Size;puzzle.Solution=generated.Solution;puzzle.Clues=generated.Clues;puzzle.Placed.Clear();puzzle.History.Clear();board.NextColor=0;board.ShowErrors=false;board.CancelDrag();scale=1;completed=false;finishedSeconds=0;started=DateTime.Now;clock.Text="00:00";title.Text=names[level];for(int i=0;i<5;i++){levelButtons[i].BackColor=i==level?Color.FromArgb(222,240,228):Color.White;}status.Text=playerProgress.Warning??"ลากบนกระดานเพื่อสร้างสี่เหลี่ยมรูปแรก";initialized=true;RefreshState();LayoutBoard();board.Invalidate();Persist();}
+    void ApplyNewPuzzle(int chosen,Puzzle generated,string date=null){initialized=false;daily=date;hints=0;gameId=date==null?Guid.NewGuid():DailyId(date);rewardGranted=false;rewardMessage="";level=chosen;puzzle.Size=generated.Size;puzzle.Solution=generated.Solution;puzzle.Clues=generated.Clues;puzzle.Placed.Clear();puzzle.History.Clear();board.NextColor=0;board.ShowErrors=false;board.CancelDrag();scale=1;completed=false;finishedSeconds=0;started=DateTime.Now;clock.Text="00:00";title.Text=TitleText();HighlightLevel();status.Text=playerProgress.Warning??"ลากบนกระดานเพื่อสร้างสี่เหลี่ยมรูปแรก";initialized=true;RefreshState();LayoutBoard();board.Invalidate();Persist();}
     void RefreshState(){
         if(puzzle.CompleteLastRegion()){board.NextColor=Math.Max(board.NextColor,puzzle.Placed.Max(p=>p.Color)+1);board.Invalidate();status.Text="เติมสี่เหลี่ยมสุดท้ายให้อัตโนมัติแล้ว";}
         stats.Text=puzzle.Size+" × "+puzzle.Size+" ช่อง · "+puzzle.Placed.Count+" / "+puzzle.Clues.Count+" สี่เหลี่ยม · "+(puzzle.Covered*100/(puzzle.Size*puzzle.Size))+"%";
         progress.Value=puzzle.Covered*100/(puzzle.Size*puzzle.Size);undo.Enabled=puzzle.History.Count>0;
         if(!puzzle.Won){completed=false;Persist();return;}if(completed){Persist();return;}
         finishedSeconds=(long)(DateTime.Now-started).TotalSeconds;completed=true;clock.Text=Elapsed();
-        if(!rewardGranted&&!pending.Any(p=>p.Id==gameId.ToString()))pending.Add(new PendingReward{Id=gameId.ToString(),Difficulty=level});
+        if(hints>0)rewardMessage="ใช้คำใบ้ "+hints+" ครั้ง · กระดานนี้ไม่ได้รับ EXP";
+        else if(!rewardGranted&&!pending.Any(p=>p.Id==gameId.ToString()))pending.Add(new PendingReward{Id=gameId.ToString(),Difficulty=level});
         if(Persist())RetryRewards();else status.Text=rewardMessage;
         if(IsHandleCreated)BeginInvoke((Action)(()=>ShowWin()));
     }
-    async void RequestNewGame(int chosen){
+    void RequestNewGame(int chosen){StartGeneration(chosen,null);}
+    void RequestDaily(){string today=DateTime.Today.ToString("yyyy-MM-dd");if(daily==today){status.Text="กำลังเล่นโจทย์ประจำวัน "+today+" อยู่แล้ว";return;}StartGeneration(1,today);}
+    static int DailySeed(string date){return int.Parse(date.Replace("-",""));}
+    // One fixed id per day, so the daily EXP can only be awarded once.
+    static Guid DailyId(string date){using(var md5=System.Security.Cryptography.MD5.Create())return new Guid(md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes("shikaku-daily-"+date)));}
+    string TitleText(){return daily!=null?"โจทย์ประจำวัน · "+daily:names[level];}
+    void HighlightLevel(){Color active=Color.FromArgb(222,240,228);for(int i=0;i<5;i++)levelButtons[i].BackColor=daily==null&&i==level?active:Color.White;dailyButton.BackColor=daily!=null?active:Color.White;}
+    void UseHint(){
+        if(generating||puzzle.Won)return;
+        if(hints==0&&!rewardGranted&&MessageBox.Show(this,"ใช้คำใบ้แล้วกระดานนี้จะไม่ได้รับ EXP ต้องการใช้คำใบ้หรือไม่?", "คำใบ้",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
+        board.CancelDrag();if(!puzzle.Hint(board.NextColor++))return;hints++;board.ShowErrors=false;board.Invalidate();
+        status.Text="คำใบ้: เติมสี่เหลี่ยมที่ถูกต้องให้ 1 รูป · ใช้คำใบ้แล้ว "+hints+" ครั้ง";RefreshState();
+    }
+    async void StartGeneration(int chosen,string date){
         if(generating)return;if(pending.Count>0&&!Persist())return;
         if(puzzle.Placed.Count>0&&!puzzle.Won&&MessageBox.Show(this,"เริ่มกระดานใหม่หรือไม่? กระดานปัจจุบันจะถูกแทนที่", "เกมใหม่",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
-        generating=true;content.Enabled=false;side.Enabled=false;UseWaitCursor=true;status.Text="กำลังสร้าง "+names[chosen]+" · หน้าต่างยังตอบสนอง กรุณารอสักครู่";
-        try{var generated=await System.Threading.Tasks.Task.Run(()=>{var result=new Puzzle();result.New(sizes[chosen]);return result;});if(!IsDisposed&&!Disposing)ApplyNewPuzzle(chosen,generated);}
+        generating=true;content.Enabled=false;side.Enabled=false;UseWaitCursor=true;status.Text="กำลังสร้าง "+(date!=null?"โจทย์ประจำวัน":names[chosen])+" · หน้าต่างยังตอบสนอง กรุณารอสักครู่";
+        try{var generated=await System.Threading.Tasks.Task.Run(()=>{var result=new Puzzle();if(date==null)result.New(sizes[chosen]);else result.NewDaily(sizes[chosen],DailySeed(date));return result;});if(!IsDisposed&&!Disposing)ApplyNewPuzzle(chosen,generated,date);}
         catch(Exception error){if(!IsDisposed)status.Text="สร้างโจทย์ไม่สำเร็จ: "+error.Message;}
         finally{if(!IsDisposed){generating=false;content.Enabled=true;side.Enabled=true;UseWaitCursor=false;}}
     }
-    SavedGame Snapshot(){return new SavedGame{Id=gameId.ToString(),Difficulty=level,ElapsedSeconds=completed?finishedSeconds:(long)(DateTime.Now-started).TotalSeconds,Completed=completed,RewardGranted=rewardGranted,Sound=soundOn,Scale=scale,Solution=puzzle.Solution.Select(r=>new SavedRectangle(r,0)).ToList(),Clues=puzzle.Clues.Select(c=>new SavedClue{X=c.Cell.X,Y=c.Cell.Y,Value=c.Value}).ToList(),Placed=puzzle.Placed.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList(),History=puzzle.History.Select(state=>state.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList()).ToList(),Pending=pending.Select(p=>new PendingReward{Id=p.Id,Difficulty=p.Difficulty}).ToList()};}
+    SavedGame Snapshot(){return new SavedGame{Id=gameId.ToString(),Difficulty=level,ElapsedSeconds=completed?finishedSeconds:(long)(DateTime.Now-started).TotalSeconds,Completed=completed,RewardGranted=rewardGranted,Daily=daily,Hints=hints,Sound=soundOn,Scale=scale,Solution=puzzle.Solution.Select(r=>new SavedRectangle(r,0)).ToList(),Clues=puzzle.Clues.Select(c=>new SavedClue{X=c.Cell.X,Y=c.Cell.Y,Value=c.Value}).ToList(),Placed=puzzle.Placed.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList(),History=puzzle.History.Select(state=>state.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList()).ToList(),Pending=pending.Select(p=>new PendingReward{Id=p.Id,Difficulty=p.Difficulty}).ToList()};}
     bool Persist(){if(!initialized)return true;try{session.Save(Snapshot());lastSave=DateTime.Now;retrySave.Visible=pending.Count>0;return true;}catch(Exception error){status.Text="บันทึกเกมไม่สำเร็จ: "+error.Message;rewardMessage="รางวัลรอบันทึก · กดลองบันทึกใหม่";retrySave.Visible=true;return false;}}
-    void RetryRewards(){if(pending.Count==0)return;if(!Persist())return;foreach(var reward in pending.ToList()){try{playerProgress.Award(Guid.Parse(reward.Id),reward.Difficulty);pending.Remove(reward);if(reward.Id==gameId.ToString())rewardGranted=true;rewardMessage="+"+PlayerProgress.ExpRewards[reward.Difficulty]+" EXP · EXP รวม "+playerProgress.TotalExp.ToString("N0");}catch(Exception error){rewardMessage="รางวัลรอบันทึก: "+error.Message;status.Text=rewardMessage;break;}}Persist();retrySave.Visible=pending.Count>0;}
-    void LoadGame(){SavedGame saved=session.Load();if(saved==null){NewGame(0);if(session.Warning!=null)status.Text=session.Warning;return;}SessionStore.Restore(saved,puzzle);replaceLegacyMaster=puzzle.Clues.Any(c=>c.Value==1)||saved.Difficulty==4&&saved.Placed.Count==0&&puzzle.Solution.All(r=>r.Height==1)&&puzzle.Clues.GroupBy(c=>c.Cell.Y).Select(row=>string.Join(",",row.OrderBy(c=>c.Cell.X).Select(c=>c.Cell.X+":"+c.Value))).Distinct().Count()==1;gameId=Guid.Parse(saved.Id);level=saved.Difficulty;completed=saved.Completed&&puzzle.Won;finishedSeconds=saved.ElapsedSeconds;started=DateTime.Now-TimeSpan.FromSeconds(saved.ElapsedSeconds);rewardGranted=saved.RewardGranted;pending.AddRange(saved.Pending);scale=Math.Max(1,Math.Min(4,saved.Scale));soundOn=saved.Sound;sound.Text="เสียง: "+(soundOn?"เปิด":"ปิด");board.NextColor=puzzle.Placed.Count==0?0:puzzle.Placed.Max(r=>r.Color)+1;title.Text=names[level];for(int i=0;i<5;i++)levelButtons[i].BackColor=i==level?Color.FromArgb(222,240,228):Color.White;initialized=true;RefreshState();clock.Text=Elapsed();status.Text=session.Warning??"เล่นต่อจากกระดานที่บันทึกไว้";LayoutBoard();}
+    void RetryRewards(){if(pending.Count==0)return;if(!Persist())return;foreach(var reward in pending.ToList()){try{bool fresh=playerProgress.Award(Guid.Parse(reward.Id),reward.Difficulty);pending.Remove(reward);if(reward.Id==gameId.ToString())rewardGranted=true;rewardMessage=fresh?"+"+PlayerProgress.ExpRewards[reward.Difficulty]+" EXP · EXP รวม "+playerProgress.TotalExp.ToString("N0"):"กระดานนี้รับ EXP ไปแล้ว";}catch(Exception error){rewardMessage="รางวัลรอบันทึก: "+error.Message;status.Text=rewardMessage;break;}}Persist();retrySave.Visible=pending.Count>0;}
+    void LoadGame(){SavedGame saved=session.Load();if(saved==null){NewGame(0);if(session.Warning!=null)status.Text=session.Warning;return;}SessionStore.Restore(saved,puzzle);replaceLegacyMaster=puzzle.Clues.Any(c=>c.Value==1)||saved.Difficulty==4&&saved.Placed.Count==0&&puzzle.Solution.All(r=>r.Height==1)&&puzzle.Clues.GroupBy(c=>c.Cell.Y).Select(row=>string.Join(",",row.OrderBy(c=>c.Cell.X).Select(c=>c.Cell.X+":"+c.Value))).Distinct().Count()==1;gameId=Guid.Parse(saved.Id);level=saved.Difficulty;completed=saved.Completed&&puzzle.Won;finishedSeconds=saved.ElapsedSeconds;started=DateTime.Now-TimeSpan.FromSeconds(saved.ElapsedSeconds);rewardGranted=saved.RewardGranted;daily=saved.Daily;hints=saved.Hints;pending.AddRange(saved.Pending);scale=Math.Max(1,Math.Min(4,saved.Scale));soundOn=saved.Sound;sound.Text="เสียง: "+(soundOn?"เปิด":"ปิด");board.NextColor=puzzle.Placed.Count==0?0:puzzle.Placed.Max(r=>r.Color)+1;title.Text=TitleText();HighlightLevel();initialized=true;RefreshState();clock.Text=Elapsed();status.Text=session.Warning??"เล่นต่อจากกระดานที่บันทึกไว้";LayoutBoard();}
     void CheckAnswer(){board.ShowErrors=true;board.Invalidate();RefreshState();int wrong=puzzle.Placed.Count(r=>!puzzle.Valid(r.Bounds));status.Text=wrong>0?"มี "+wrong+" รูปที่ยังไม่ถูกต้อง (กรอบแดง)":"สี่เหลี่ยมที่วางถูกต้องแล้ว · เหลือ "+(puzzle.Size*puzzle.Size-puzzle.Covered)+" ช่อง";}
     void SetScale(float value){scale=Math.Max(1,Math.Min(4,value));board.CancelDrag();LayoutBoard();Persist();}
     void LayoutBoard(){if(layingOut||viewport.ClientSize.Width<30||viewport.ClientSize.Height<30)return;layingOut=true;try{viewport.AutoScrollPosition=Point.Empty;int size=(int)(Math.Min(viewport.ClientSize.Width-28,viewport.ClientSize.Height-28)*scale);size=Math.Max(40,size);board.Size=new Size(size,size);board.Location=new Point(Math.Max(12,(viewport.ClientSize.Width-size)/2),Math.Max(12,(viewport.ClientSize.Height-size)/2));viewport.AutoScrollMinSize=new Size(size+24,size+24);viewport.AutoScrollPosition=new Point(Math.Max(0,(size+24-viewport.ClientSize.Width)/2),Math.Max(0,(size+24-viewport.ClientSize.Height)/2));scaleLabel.Text=(scale*100).ToString("0")+"%";minus.Enabled=scale>1;plus.Enabled=scale<4;exitFull.Location=new Point(Math.Max(4,viewport.ClientSize.Width-exitFull.Width-12),12);exitFull.BringToFront();board.Invalidate();}finally{layingOut=false;}}
     void ToggleFull(){board.CancelDrag();if(!full){previousScale=scale;oldBorder=FormBorderStyle;oldState=WindowState;oldBounds=Bounds;full=true;header.Visible=side.Visible=top.Visible=bottom.Visible=false;content.Padding=Padding.Empty;WindowState=FormWindowState.Normal;FormBorderStyle=FormBorderStyle.None;Bounds=Screen.FromControl(this).Bounds;scale=1;exitFull.Visible=true;}else{full=false;exitFull.Visible=false;FormBorderStyle=oldBorder;Bounds=oldBounds;WindowState=oldState;header.Visible=side.Visible=top.Visible=bottom.Visible=true;content.Padding=new Padding(12);scale=previousScale;}LayoutBoard();}
-    void ShowWin(){if(!completed||!puzzle.Won||IsDisposed)return;using(var dialog=new Form{Text="สำเร็จ!",ClientSize=new Size(470,285),StartPosition=FormStartPosition.CenterParent,FormBorderStyle=FormBorderStyle.FixedDialog,MaximizeBox=false,MinimizeBox=false,BackColor=Color.White,Font=Font}){Label caption=new Label{Text="ยอดเยี่ยม! คุณทำสำเร็จแล้ว",Font=new Font("Segoe UI",16,FontStyle.Bold),ForeColor=Green,TextAlign=ContentAlignment.MiddleCenter,Dock=DockStyle.Top,Height=70};Label detail=new Label{Text=names[level]+" · "+puzzle.Size+" × "+puzzle.Size+" ช่อง\nเวลา "+Elapsed()+"\n"+rewardMessage,TextAlign=ContentAlignment.MiddleCenter,Dock=DockStyle.Top,Height=100};dialog.Controls.Add(detail);dialog.Controls.Add(caption);Button again=MakeButton("เล่นใหม่",()=>{dialog.DialogResult=DialogResult.Retry;dialog.Close();});again.SetBounds(125,188,220,36);dialog.Controls.Add(again);Button close=MakeButton("ดูกระดานที่เล่นจบ",()=>dialog.Close());close.SetBounds(125,232,220,32);dialog.Controls.Add(close);dialog.AcceptButton=again;if(dialog.ShowDialog(this)==DialogResult.Retry)RequestNewGame(level);}}
+    void ShowWin(){if(!completed||!puzzle.Won||IsDisposed)return;using(var dialog=new Form{Text="สำเร็จ!",ClientSize=new Size(470,285),StartPosition=FormStartPosition.CenterParent,FormBorderStyle=FormBorderStyle.FixedDialog,MaximizeBox=false,MinimizeBox=false,BackColor=Color.White,Font=Font}){Label caption=new Label{Text="ยอดเยี่ยม! คุณทำสำเร็จแล้ว",Font=new Font("Segoe UI",16,FontStyle.Bold),ForeColor=Green,TextAlign=ContentAlignment.MiddleCenter,Dock=DockStyle.Top,Height=70};Label detail=new Label{Text=TitleText()+" · "+puzzle.Size+" × "+puzzle.Size+" ช่อง\nเวลา "+Elapsed()+"\n"+rewardMessage,TextAlign=ContentAlignment.MiddleCenter,Dock=DockStyle.Top,Height=100};dialog.Controls.Add(detail);dialog.Controls.Add(caption);Button again=MakeButton("เล่นใหม่",()=>{dialog.DialogResult=DialogResult.Retry;dialog.Close();});again.SetBounds(125,188,220,36);dialog.Controls.Add(again);Button close=MakeButton("ดูกระดานที่เล่นจบ",()=>dialog.Close());close.SetBounds(125,232,220,32);dialog.Controls.Add(close);dialog.AcceptButton=again;if(dialog.ShowDialog(this)==DialogResult.Retry)RequestNewGame(level);}}
     void ShowAchievements(){using(Form window=CreateAchievementWindow())window.ShowDialog(this);}
     public Form CreateAchievementWindow(){
         Form window=new Form{Text="Achievement · สถิติผู้เล่น",ClientSize=new Size(650,Math.Min(734,Screen.FromControl(this).WorkingArea.Height-100)),MinimumSize=new Size(480,360),StartPosition=FormStartPosition.CenterParent,BackColor=Color.FromArgb(237,242,237),Font=Font,MaximizeBox=false,AutoScaleMode=AutoScaleMode.Dpi};

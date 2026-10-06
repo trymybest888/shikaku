@@ -17,6 +17,13 @@ public static class Regression {
             }
             Puzzle ambiguous=new Puzzle{Size=2};ambiguous.Clues.Add(new Clue{Cell=new Point(0,0),Value=2});ambiguous.Clues.Add(new Clue{Cell=new Point(1,1),Value=2});Check(UniquePuzzle.Count(ambiguous,1000)==2,"ambiguous fixture");ambiguous.Clues[0].Value=3;Check(UniquePuzzle.Count(ambiguous,1000)==0,"impossible fixture");
             Console.WriteLine("PASS: 25 unique puzzles, all sizes, automatic finish, ambiguous/impossible fixtures.");
+            Func<Puzzle,string> layout=p=>string.Join(";",p.Clues.Select(c=>c.Cell.X+","+c.Cell.Y+"="+c.Value));
+            foreach(int seed in new[]{20261006,20261007,20270101}){Puzzle a=new Puzzle(),b=new Puzzle();a.NewDaily(10,seed);b.NewDaily(10,seed);Check(layout(a)==layout(b),"daily deterministic");Check(a.ValidateGenerated()&&UniquePuzzle.Count(a,5000)==1&&a.Clues.All(c=>c.Value>=2),"daily unique");}
+            {Puzzle a=new Puzzle(),b=new Puzzle();a.NewDaily(10,20261006);b.NewDaily(10,20261007);Check(layout(a)!=layout(b),"daily differs per day");}
+            Puzzle hinted=new Puzzle();hinted.New(10);Rectangle target=hinted.Solution.OrderBy(r=>r.Width*r.Height).First();Rectangle wrong=new Rectangle(target.X,target.Y,1,1);hinted.Place(wrong,0);
+            Check(hinted.Hint(1)&&hinted.Placed.Any(p=>p.Bounds==target)&&!hinted.Placed.Any(p=>p.Bounds==wrong),"hint replaces a wrong rectangle");
+            while(hinted.Hint(hinted.Placed.Count+1)){}Check(hinted.Won&&!hinted.Hint(99),"hints solve the board");
+            Console.WriteLine("PASS: daily puzzles deterministic and unique, hints fix mistakes and solve the board.");
             string progress=Path.Combine(directory,"progress.xml");var first=new PlayerProgress(progress);var stale=new PlayerProgress(progress);Guid id=Guid.NewGuid();Check(first.Award(id,0),"first award");Check(stale.Award(Guid.NewGuid(),4),"stale award");var reload=new PlayerProgress(progress);Check(reload.TotalWins==2&&reload.TotalExp==1625,"stale instance merge");Check(!reload.Award(id,0),"duplicate after restart");
             using(var locked=new FileStream(progress+".lock",FileMode.Open,FileAccess.ReadWrite,FileShare.None)){bool failed=false;try{reload.Award(Guid.NewGuid(),1);}catch(IOException){failed=true;}Check(failed&&reload.TotalWins==2,"locked save failure");}Check(reload.Award(Guid.NewGuid(),1)&&reload.TotalExp==1725,"retry after unlock");Console.WriteLine("PASS: EXP persistence, stale-instance merge, duplicate prevention, failure/retry.");
             Puzzle original=new Puzzle();original.New(10);original.Place(original.Solution[0],3);original.Place(original.Solution[1],4);Guid game=Guid.NewGuid();var saved=new SavedGame{Id=game.ToString(),Difficulty=1,ElapsedSeconds=123,Scale=1.5f,Sound=false,Solution=original.Solution.Select(r=>new SavedRectangle(r,0)).ToList(),Clues=original.Clues.Select(c=>new SavedClue{X=c.Cell.X,Y=c.Cell.Y,Value=c.Value}).ToList(),Placed=original.Placed.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList(),History=original.History.Select(state=>state.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList()).ToList()};saved.Pending.Add(new PendingReward{Id=game.ToString(),Difficulty=1});
@@ -37,6 +44,21 @@ public static class Regression {
                 typeof(GameWindow).GetMethod("RetryRewards",flags).Invoke(queueWindow,null);Check(new PlayerProgress(Path.Combine(queueDir,"progress.xml")).TotalWins==1,"retry idempotent");
             }
             foreach(string file in Directory.GetFiles(queueDir))File.Delete(file);Directory.Delete(queueDir);
+            string hintDir=Path.Combine(directory,"hint");Directory.CreateDirectory(hintDir);
+            using(var hintWindow=new GameWindow(hintDir)){
+                var flags=BindingFlags.Instance|BindingFlags.NonPublic;
+                var current=(Puzzle)typeof(GameWindow).GetField("puzzle",flags).GetValue(hintWindow);
+                typeof(GameWindow).GetField("hints",flags).SetValue(hintWindow,1);
+                foreach(var r in current.Solution)current.Placed.Add(new RegionBox(r,current.Placed.Count));
+                typeof(GameWindow).GetMethod("RefreshState",flags).Invoke(hintWindow,null);
+                Check(new PlayerProgress(Path.Combine(hintDir,"progress.xml")).TotalWins==0&&new SessionStore(Path.Combine(hintDir,"session.xml")).Load().Hints==1,"hinted win gives no EXP");
+                string today=DateTime.Today.ToString("yyyy-MM-dd");var daily=new Puzzle();daily.NewDaily(10,int.Parse(today.Replace("-","")));
+                var apply=typeof(GameWindow).GetMethod("ApplyNewPuzzle",flags);apply.Invoke(hintWindow,new object[]{1,daily,today});Guid dailyId=(Guid)typeof(GameWindow).GetField("gameId",flags).GetValue(hintWindow);
+                var dailySave=new SessionStore(Path.Combine(hintDir,"session.xml")).Load();Check(dailySave.Daily==today&&dailySave.Hints==0,"daily saved");
+                apply.Invoke(hintWindow,new object[]{1,daily,today});Check((Guid)typeof(GameWindow).GetField("gameId",flags).GetValue(hintWindow)==dailyId,"daily id fixed per day");
+            }
+            foreach(string file in Directory.GetFiles(hintDir))File.Delete(file);Directory.Delete(hintDir);
+            Console.WriteLine("PASS: hinted wins give no EXP, daily game saved with a fixed id per day.");
             Console.WriteLine("PASS: failed win reward queued on disk, retained across new games, retried once.");
             using(var window=new GameWindow(directory)){
                 using(var achievement=window.CreateAchievementWindow()){

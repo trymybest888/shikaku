@@ -37,13 +37,14 @@ public static class UniquePuzzle {
             }
         };search(0);return timedOut?-1:found;
     }
-    public static bool Ensure(Puzzle puzzle) {
-        var total=Stopwatch.StartNew();var random=new Random();var seen=new HashSet<string>();
+    public static bool Ensure(Puzzle puzzle) {return Ensure(puzzle,new Random(),true);}
+    public static bool Ensure(Puzzle puzzle,Random random,bool timed) {
+        var total=Stopwatch.StartNew();var seen=new HashSet<string>();
         Func<string> signature=()=>string.Join(";",puzzle.Clues.Select(c=>c.Cell.X+","+c.Cell.Y));
         for(int pass=0;pass<puzzle.Size*puzzle.Size*2;pass++){
-            if(total.ElapsedMilliseconds>2500)return false;
+            if(timed&&total.ElapsedMilliseconds>2500)return false;
             if(puzzle.Clues.Any(c=>c.Value<2))return false;
-            seen.Add(signature());int count=Count(puzzle,160);if(count==1)return true;
+            seen.Add(signature());int count=Count(puzzle,timed?160:int.MaxValue);if(count==1)return true;
             Rectangle region=ambiguous.Width>0?ambiguous:puzzle.Solution.OrderByDescending(r=>r.Width*r.Height).First();
             Clue clue=puzzle.Clues.First(c=>region.Contains(c.Cell));Point original=clue.Cell;
             // Resolve ambiguity by moving the existing clue, without introducing 1s.
