@@ -1,0 +1,235 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Linq;
+using System.Media;
+using System.IO;
+using System.Windows.Forms;
+
+internal static class Program {
+    [STAThread] static void Main() {
+        Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+        bool created;
+        using(var instance=new System.Threading.Mutex(true,"Local\\Shikaku-"+Environment.UserName,out created)){
+            if(!created){MessageBox.Show("Shikaku เปิดอยู่แล้ว กรุณากลับไปยังหน้าต่างเดิม", "Shikaku");return;}
+            try{Application.Run(new GameWindow());}finally{instance.ReleaseMutex();}
+        }
+    }
+}
+public class RegionBox {
+    public Rectangle Bounds; public int Color;
+    public RegionBox(Rectangle bounds, int color) { Bounds=bounds; Color=color; }
+    public RegionBox Copy() { return new RegionBox(Bounds,Color); }
+}
+public class Clue { public Point Cell; public int Value; }
+public class Puzzle {
+    public int Size; public List<Clue> Clues=new List<Clue>();
+    public List<RegionBox> Placed=new List<RegionBox>();
+    public List<Rectangle> Solution=new List<Rectangle>();
+    public Stack<List<RegionBox>> History=new Stack<List<RegionBox>>();
+    readonly Random random=new Random();
+    public void New(int size) {
+        if(size<2||size>40)throw new ArgumentOutOfRangeException("size");
+        for(int retry=0;retry<8;retry++) { Generate(size); if(ValidateGenerated()){if(UniquePuzzle.Ensure(this)&&ValidateGenerated()&&Clues.All(c=>c.Value>=2))return;} }
+        throw new InvalidOperationException("ไม่สามารถสร้างโจทย์ที่ตรวจสอบคำตอบแล้วได้ กรุณาเริ่มเกมใหม่");
+    }
+    private void Generate(int size) {
+        Size=size; Placed.Clear(); History.Clear(); Clues.Clear();
+        Solution=new List<Rectangle>{new Rectangle(0,0,size,size)};
+        int target=(int)Math.Ceiling(size*size/(size==5?4.0:6.0));
+        for(int attempt=0;Solution.Count<target && attempt<size*size*10;attempt++) {
+            int i=random.Next(Solution.Count); Rectangle r=Solution[i]; bool horizontal=random.Next(2)==0;
+            int length=horizontal?r.Width:r.Height, other=horizontal?r.Height:r.Width;
+            List<int> cuts=new List<int>();
+            for(int k=1;k<length;k++) if(k*other>=2 && (length-k)*other>=2) cuts.Add(k);
+            if(cuts.Count==0) continue; int cut=cuts[random.Next(cuts.Count)];
+            Solution.RemoveAt(i);
+            if(horizontal) {Solution.Add(new Rectangle(r.X,r.Y,cut,r.Height));Solution.Add(new Rectangle(r.X+cut,r.Y,r.Width-cut,r.Height));}
+            else {Solution.Add(new Rectangle(r.X,r.Y,r.Width,cut));Solution.Add(new Rectangle(r.X,r.Y+cut,r.Width,r.Height-cut));}
+        }
+        foreach(Rectangle r in Solution) Clues.Add(new Clue{Cell=new Point(r.X+random.Next(r.Width),r.Y+random.Next(r.Height)),Value=r.Width*r.Height});
+    }
+    public bool ValidateGenerated() {
+        if(Size<2||Solution.Count==0||Clues.Count!=Solution.Count)return false;
+        if(Clues.Any(c=>c.Value<=0||c.Cell.X<0||c.Cell.Y<0||c.Cell.X>=Size||c.Cell.Y>=Size))return false;
+        if(Clues.Select(c=>c.Cell).Distinct().Count()!=Clues.Count)return false;
+        if(Clues.Sum(c=>(long)c.Value)!=(long)Size*Size)return false;
+        bool[] occupied=new bool[Size*Size];
+        foreach(Rectangle r in Solution) {
+            if(r.Width<=0||r.Height<=0||r.X<0||r.Y<0||r.Right>Size||r.Bottom>Size||!Valid(r))return false;
+            for(int y=r.Top;y<r.Bottom;y++)for(int x=r.Left;x<r.Right;x++) {
+                int index=y*Size+x;if(occupied[index])return false;occupied[index]=true;
+            }
+        }
+        return occupied.All(cell=>cell);
+    }
+    public void Save() { History.Push(Placed.Select(r=>r.Copy()).ToList()); }
+    public void Place(Rectangle r,int color) {Save();Placed.RemoveAll(p=>p.Bounds.IntersectsWith(r));Placed.Add(new RegionBox(r,color));}
+    public bool Remove(Point p) {int i=Placed.FindIndex(r=>r.Bounds.Contains(p));if(i<0)return false;Save();Placed.RemoveAt(i);return true;}
+    public bool Valid(Rectangle r) {var nums=Clues.Where(c=>r.Contains(c.Cell)).ToList();return nums.Count==1&&nums[0].Value==r.Width*r.Height;}
+    public bool CompleteLastRegion() {
+        if(Placed.Count==0||Placed.Any(p=>!Valid(p.Bounds)))return false;
+        if(Clues.Count(c=>!Placed.Any(p=>p.Bounds.Contains(c.Cell)))!=1)return false;
+        List<Point> remaining=new List<Point>();
+        for(int y=0;y<Size;y++)for(int x=0;x<Size;x++)if(!Placed.Any(p=>p.Bounds.Contains(x,y)))remaining.Add(new Point(x,y));
+        if(remaining.Count==0)return false;
+        int left=remaining.Min(p=>p.X),top=remaining.Min(p=>p.Y),right=remaining.Max(p=>p.X),bottom=remaining.Max(p=>p.Y);
+        Rectangle last=new Rectangle(left,top,right-left+1,bottom-top+1);
+        if(last.Width*last.Height!=remaining.Count||!Valid(last)||Placed.Any(p=>p.Bounds.IntersectsWith(last)))return false;
+        // Keep the automatic fill in the same undo step as the player's last placement.
+        Placed.Add(new RegionBox(last,Placed.Max(p=>p.Color)+1));return true;
+    }
+    public int Covered { get {return Placed.Sum(r=>r.Bounds.Width*r.Bounds.Height);} }
+    public bool Won { get {return Covered==Size*Size&&Placed.All(r=>Valid(r.Bounds));} }
+}
+public class BoardControl : Control {
+    public Puzzle Puzzle; public bool ShowErrors; public int NextColor;
+    Point first,last; bool dragging; int dragColor;
+    public event Action<bool> Changed;
+    public BoardControl(Puzzle puzzle) {Puzzle=puzzle;DoubleBuffered=true;ResizeRedraw=true;Cursor=Cursors.Cross;SetStyle(ControlStyles.Selectable,true);}
+    float Cell {get{return Width/(float)Puzzle.Size;}}
+    Point CellAt(Point p) {return new Point(Math.Max(0,Math.Min(Puzzle.Size-1,(int)(p.X/Cell))),Math.Max(0,Math.Min(Puzzle.Size-1,(int)(p.Y/Cell))));}
+    Rectangle Selection {get{return new Rectangle(Math.Min(first.X,last.X),Math.Min(first.Y,last.Y),Math.Abs(first.X-last.X)+1,Math.Abs(first.Y-last.Y)+1);}}
+    public void CancelDrag(){dragging=false;Capture=false;Invalidate();}
+    protected override void OnMouseDown(MouseEventArgs e) {base.OnMouseDown(e);if(e.Button!=MouseButtons.Left)return;Focus();first=last=CellAt(e.Location);dragColor=NextColor++;dragging=true;Capture=true;Invalidate();}
+    protected override void OnMouseMove(MouseEventArgs e) {base.OnMouseMove(e);if(!dragging)return;last=CellAt(e.Location);Invalidate();}
+    protected override void OnMouseUp(MouseEventArgs e) {base.OnMouseUp(e);if(e.Button!=MouseButtons.Left||!dragging)return;last=CellAt(e.Location);Rectangle r=Selection;dragging=false;Capture=false;ShowErrors=false;bool placed=true;if(r.Width==1&&r.Height==1&&Puzzle.Remove(last))placed=false;else Puzzle.Place(r,dragColor);Invalidate();if(Changed!=null)Changed(placed);}
+    protected override void OnMouseCaptureChanged(EventArgs e){base.OnMouseCaptureChanged(e);if(!Capture&&dragging){dragging=false;Invalidate();}}
+    static Color Shade(int id,bool border) {double hue=(id*137.508)%360/60;double saturation=border?.48:.58,light=border?.36:.86,c=(1-Math.Abs(2*light-1))*saturation,x=c*(1-Math.Abs(hue%2-1)),m=light-c/2;double r=0,g=0,b=0;if(hue<1){r=c;g=x;}else if(hue<2){r=x;g=c;}else if(hue<3){g=c;b=x;}else if(hue<4){g=x;b=c;}else if(hue<5){r=x;b=c;}else{r=c;b=x;}return Color.FromArgb((int)((r+m)*255),(int)((g+m)*255),(int)((b+m)*255));}
+    RectangleF Pixels(Rectangle r){return new RectangleF(r.X*Cell,r.Y*Cell,r.Width*Cell,r.Height*Cell);}
+    void PaintRegion(Graphics g,Rectangle r,int color,bool preview) {RectangleF p=Pixels(r);using(var brush=new SolidBrush(preview?Color.FromArgb(185,Shade(color,false)):Shade(color,false)))g.FillRectangle(brush,p);using(var pen=new Pen(Shade(color,true),2))g.DrawRectangle(pen,p.X+1,p.Y+1,Math.Max(0,p.Width-2),Math.Max(0,p.Height-2));}
+    public static Font FitClueFont(Graphics graphics,string text,float cell,StringFormat format) {
+        float size=Math.Max(1,Math.Min(26,cell*.70f));
+        Font font=new Font("Segoe UI",size,FontStyle.Bold,GraphicsUnit.Pixel);
+        SizeF measured=graphics.MeasureString(text,font,PointF.Empty,format);
+        float factor=Math.Min(1,Math.Min(cell*.84f/measured.Width,cell*.84f/measured.Height));
+        if(factor<1){font.Dispose();font=new Font("Segoe UI",Math.Max(.5f,size*factor),FontStyle.Bold,GraphicsUnit.Pixel);}
+        return font;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        base.OnPaint(e);if(Puzzle.Size==0)return;Graphics g=e.Graphics;g.Clear(Color.White);g.SmoothingMode=SmoothingMode.AntiAlias;g.TextRenderingHint=System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        foreach(var r in Puzzle.Placed)PaintRegion(g,r.Bounds,r.Color,false);
+        if(dragging)PaintRegion(g,Selection,dragColor,true);
+        using(var thin=new Pen(Color.FromArgb(205,217,207),.8f))using(var group=new Pen(Color.FromArgb(164,185,170),1.2f))for(int i=0;i<=Puzzle.Size;i++){Pen pen=Puzzle.Size>=10&&i%5==0?group:thin;g.DrawLine(pen,i*Cell,0,i*Cell,Height);g.DrawLine(pen,0,i*Cell,Width,i*Cell);}
+        using(var format=new StringFormat{Alignment=StringAlignment.Center,LineAlignment=StringAlignment.Center}) {
+            using(var textFormat=(StringFormat)StringFormat.GenericTypographic.Clone())using(var ink=new SolidBrush(Color.FromArgb(32,56,47))) {
+                textFormat.Alignment=StringAlignment.Center;textFormat.LineAlignment=StringAlignment.Center;
+                textFormat.FormatFlags|=StringFormatFlags.NoWrap;
+                foreach(var c in Puzzle.Clues)using(var font=FitClueFont(g,c.Value.ToString(),Cell,textFormat))
+                    g.DrawString(c.Value.ToString(),font,ink,new PointF((c.Cell.X+.5f)*Cell,(c.Cell.Y+.5f)*Cell),textFormat);
+            }
+            if(dragging){RectangleF p=Pixels(Selection);float size=Math.Max(18,Math.Min(34,Cell*.45f));using(var font=new Font("Segoe UI",size,FontStyle.Bold,GraphicsUnit.Pixel))using(var path=new GraphicsPath()){path.AddString((Selection.Width*Selection.Height).ToString(),font.FontFamily,(int)FontStyle.Bold,size,new PointF(p.X+p.Width/2,p.Y+p.Height/2-size*.65f),new StringFormat{Alignment=StringAlignment.Center});using(var outline=new Pen(Color.White,3){LineJoin=LineJoin.Round})g.DrawPath(outline,path);using(var ink=new SolidBrush(Color.FromArgb(184,73,10)))g.FillPath(ink,path);}}
+        }
+        if(ShowErrors)using(var pen=new Pen(Color.Firebrick,3){DashStyle=DashStyle.Dash})foreach(var r in Puzzle.Placed.Where(p=>!Puzzle.Valid(p.Bounds))){RectangleF p=Pixels(r.Bounds);g.DrawRectangle(pen,p.X+2,p.Y+2,Math.Max(0,p.Width-4),Math.Max(0,p.Height-4));}
+        using(var border=new Pen(Color.FromArgb(82,112,94),2))g.DrawRectangle(border,1,1,Width-2,Height-2);
+    }
+}
+public class GameWindow : Form {
+    readonly PlayerProgress playerProgress; readonly SessionStore session; readonly List<PendingReward> pending=new List<PendingReward>(); Guid gameId; bool rewardGranted; string rewardMessage="";
+    readonly Puzzle puzzle=new Puzzle(); readonly string[] names={"Easy","Medium","Hard","Expert","Master"}; readonly int[] sizes={5,10,20,30,40};
+    readonly Panel header=new Panel(),side=new Panel(),content=new Panel(),viewport=new Panel(),top=new Panel(),bottom=new Panel();
+    readonly Label title=new Label(),stats=new Label(),clock=new Label(),status=new Label(),scaleLabel=new Label();
+    readonly ProgressBar progress=new ProgressBar(); readonly FlowLayoutPanel views=new FlowLayoutPanel(),actions=new FlowLayoutPanel();
+    readonly List<Button> levelButtons=new List<Button>(); Button undo,minus,plus,sound,exitFull,retrySave;
+    readonly BoardControl board; readonly Timer timer=new Timer(); readonly SoundPlayer player; readonly MemoryStream audio;
+    int level; float scale=1,previousScale=1; DateTime started; bool completed,soundOn=true,full,layingOut,initialized,generating,replaceLegacyMaster;long finishedSeconds;DateTime lastSave;
+    FormBorderStyle oldBorder; FormWindowState oldState; Rectangle oldBounds;
+    static readonly Color Green=Color.FromArgb(36,104,78),Muted=Color.FromArgb(112,129,120);
+    public GameWindow():this(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Shikaku")){}
+    public GameWindow(string storage) {
+        playerProgress=new PlayerProgress(Path.Combine(storage,"progress.xml"));session=new SessionStore(Path.Combine(storage,"session.xml"));AutoScaleMode=AutoScaleMode.Dpi;AutoScaleDimensions=new SizeF(96,96);
+        Text="Shikaku · Verified puzzles";ClientSize=new Size(1200,850);MinimumSize=new Size(820,540);StartPosition=FormStartPosition.CenterScreen;BackColor=Color.FromArgb(237,242,237);Font=new Font("Segoe UI",10);KeyPreview=true;
+        board=new BoardControl(puzzle);audio=CreateSound();player=new SoundPlayer(audio);player.Load();
+        header.Dock=DockStyle.Top;header.Height=56;Controls.Add(header);Label brand=new Label{Text="▦  SHIKAKU",Font=new Font("Segoe UI",19,FontStyle.Bold),ForeColor=Green,AutoSize=true,Location=new Point(20,12)};header.Controls.Add(brand);Button achievements=MakeButton("Achievement · สถิติ / EXP",()=>ShowAchievements());achievements.SetBounds(650,12,300,32);achievements.Anchor=AnchorStyles.Top|AnchorStyles.Right;header.Controls.Add(achievements);
+        side.Dock=DockStyle.Left;side.Width=218;side.Padding=new Padding(16);side.AutoScroll=true;Controls.Add(side);
+        Label label=new Label{Text="เลือกระดับความยาก",ForeColor=Muted,AutoSize=true,Location=new Point(16,14)};side.Controls.Add(label);
+        for(int i=0;i<5;i++){int choice=i;Button b=MakeButton(names[i]+"     "+sizes[i]+" × "+sizes[i],()=>RequestNewGame(choice));b.SetBounds(16,48+i*48,184,40);side.Controls.Add(b);levelButtons.Add(b);}
+        Label rules=new Label{Text="วิธีเล่น\n\nลากเพื่อสร้างสี่เหลี่ยม\nแตะรูปเดิมเพื่อลบ\nลากทับเพื่อแทนที่\n\nแต่ละรูปต้องมีตัวเลขหนึ่งตัว\nและจำนวนช่องตรงกับตัวเลข\n\nกดตรวจคำตอบเพื่อดูรูปที่ผิด",ForeColor=Muted,Location=new Point(18,310),Size=new Size(185,260)};side.Controls.Add(rules);
+        content.Dock=DockStyle.Fill;content.Padding=new Padding(12);content.BackColor=Color.White;Controls.Add(content);content.BringToFront();
+        top.Dock=DockStyle.Top;top.Height=104;content.Controls.Add(top);
+        title.SetBounds(0,0,300,30);title.Font=new Font("Segoe UI",17,FontStyle.Bold);stats.SetBounds(0,34,650,24);stats.ForeColor=Muted;clock.Font=new Font("Segoe UI",17,FontStyle.Bold);clock.ForeColor=Green;clock.TextAlign=ContentAlignment.MiddleRight;clock.SetBounds(700,0,120,36);clock.Anchor=AnchorStyles.Top|AnchorStyles.Right;top.Controls.AddRange(new Control[]{title,stats,clock});
+        views.Dock=DockStyle.Bottom;views.Height=38;top.Controls.Add(views);
+        minus=MakeButton("−",()=>SetScale(scale-.25f));plus=MakeButton("+",()=>SetScale(scale+.25f));scaleLabel.TextAlign=ContentAlignment.MiddleCenter;scaleLabel.Size=new Size(58,32);
+        views.Controls.AddRange(new Control[]{minus,scaleLabel,plus,MakeButton("พอดีจอ",()=>SetScale(1)),MakeButton("⛶ เต็มจอ",()=>ToggleFull())});
+        bottom.Dock=DockStyle.Bottom;bottom.Height=130;content.Controls.Add(bottom);progress.Dock=DockStyle.Top;progress.Height=5;bottom.Controls.Add(progress);
+        actions.SetBounds(0,15,850,68);actions.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right;bottom.Controls.Add(actions);
+        Button fresh=MakeButton("＋ เกมใหม่",()=>RequestNewGame(level));fresh.BackColor=Green;fresh.ForeColor=Color.White;
+        undo=MakeButton("↶ ย้อนกลับ",()=>{if(puzzle.History.Count>0){puzzle.Placed=puzzle.History.Pop();completed=false;board.ShowErrors=false;RefreshState();board.Invalidate();status.Text="ย้อนกลับแล้ว";}});
+        sound=MakeButton("เสียง: เปิด",()=>{soundOn=!soundOn;sound.Text="เสียง: "+(soundOn?"เปิด":"ปิด");Persist();});
+        retrySave=MakeButton("ลองบันทึกใหม่",()=>{Persist();RetryRewards();});
+        actions.Controls.AddRange(new Control[]{fresh,undo,MakeButton("ล้างกระดาน",()=>{if(puzzle.Placed.Count>0&&MessageBox.Show(this,"ล้างรูปที่วางทั้งหมดหรือไม่? ย้อนกลับได้", "ล้างกระดาน",MessageBoxButtons.YesNo,MessageBoxIcon.Question)==DialogResult.Yes){puzzle.Save();puzzle.Placed.Clear();completed=false;board.ShowErrors=false;board.Invalidate();RefreshState();}}),MakeButton("ตรวจคำตอบ",CheckAnswer),sound,retrySave});
+        status.SetBounds(0,88,850,34);status.Anchor=AnchorStyles.Left|AnchorStyles.Right|AnchorStyles.Top;status.ForeColor=Muted;bottom.Controls.Add(status);
+        viewport.Dock=DockStyle.Fill;viewport.BackColor=Color.FromArgb(234,240,233);viewport.AutoScroll=true;content.Controls.Add(viewport);viewport.BringToFront();viewport.Controls.Add(board);
+        exitFull=MakeButton("ออกจากเต็มจอ · Esc",()=>ToggleFull());exitFull.Visible=false;viewport.Controls.Add(exitFull);
+        viewport.Resize+=(s,e)=>LayoutBoard();board.Changed+=placed=>{if(placed&&soundOn){try{player.Play();}catch{}}status.Text=placed?"วางสี่เหลี่ยมแล้ว · กดตรวจคำตอบเมื่อต้องการ":"ลบสี่เหลี่ยมแล้ว";RefreshState();};
+        timer.Interval=250;timer.Tick+=(s,e)=>{if(!completed)clock.Text=Elapsed();if(initialized&&(DateTime.Now-lastSave).TotalSeconds>=10)Persist();};timer.Start();KeyDown+=(s,e)=>{if(e.KeyCode==Keys.Escape&&full){ToggleFull();e.Handled=true;}};
+        LoadGame();Shown+=(s,e)=>{Rectangle work=Screen.FromControl(this).WorkingArea;Size=new Size(Math.Min(Width,work.Width),Math.Min(Height,work.Height));LayoutBoard();RetryRewards();if(replaceLegacyMaster)RequestNewGame(level);};FormClosing+=(s,e)=>{if(!Persist()&&MessageBox.Show(this,"บันทึกเกมไม่สำเร็จ ต้องการปิดและทิ้งการเปลี่ยนแปลงหรือไม่?", "บันทึกเกม",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)e.Cancel=true;};
+    }
+    Button MakeButton(string text,Action action){Button b=new Button{Text=text,AutoSize=true,Height=32,FlatStyle=FlatStyle.Flat,BackColor=Color.White,ForeColor=Green,Padding=new Padding(8,2,8,2),Margin=new Padding(0,0,7,0),Cursor=Cursors.Hand};b.FlatAppearance.BorderColor=Color.FromArgb(210,224,214);b.Click+=(s,e)=>action();return b;}
+    string Elapsed(){TimeSpan t=TimeSpan.FromSeconds(completed?finishedSeconds:Math.Max(0,(DateTime.Now-started).TotalSeconds));return ((int)t.TotalMinutes).ToString("00")+":"+t.Seconds.ToString("00");}
+    void NewGame(int chosen){var generated=new Puzzle();generated.New(sizes[chosen]);ApplyNewPuzzle(chosen,generated);}
+    void ApplyNewPuzzle(int chosen,Puzzle generated){initialized=false;gameId=Guid.NewGuid();rewardGranted=false;rewardMessage="";level=chosen;puzzle.Size=generated.Size;puzzle.Solution=generated.Solution;puzzle.Clues=generated.Clues;puzzle.Placed.Clear();puzzle.History.Clear();board.NextColor=0;board.ShowErrors=false;board.CancelDrag();scale=1;completed=false;finishedSeconds=0;started=DateTime.Now;clock.Text="00:00";title.Text=names[level];for(int i=0;i<5;i++){levelButtons[i].BackColor=i==level?Color.FromArgb(222,240,228):Color.White;}status.Text=playerProgress.Warning??"ลากบนกระดานเพื่อสร้างสี่เหลี่ยมรูปแรก";initialized=true;RefreshState();LayoutBoard();board.Invalidate();Persist();}
+    void RefreshState(){
+        if(puzzle.CompleteLastRegion()){board.NextColor=Math.Max(board.NextColor,puzzle.Placed.Max(p=>p.Color)+1);board.Invalidate();status.Text="เติมสี่เหลี่ยมสุดท้ายให้อัตโนมัติแล้ว";}
+        stats.Text=puzzle.Size+" × "+puzzle.Size+" ช่อง · "+puzzle.Placed.Count+" / "+puzzle.Clues.Count+" สี่เหลี่ยม · "+(puzzle.Covered*100/(puzzle.Size*puzzle.Size))+"%";
+        progress.Value=puzzle.Covered*100/(puzzle.Size*puzzle.Size);undo.Enabled=puzzle.History.Count>0;
+        if(!puzzle.Won){completed=false;Persist();return;}if(completed){Persist();return;}
+        finishedSeconds=(long)(DateTime.Now-started).TotalSeconds;completed=true;clock.Text=Elapsed();
+        if(!rewardGranted&&!pending.Any(p=>p.Id==gameId.ToString()))pending.Add(new PendingReward{Id=gameId.ToString(),Difficulty=level});
+        if(Persist())RetryRewards();else status.Text=rewardMessage;
+        if(IsHandleCreated)BeginInvoke((Action)(()=>ShowWin()));
+    }
+    async void RequestNewGame(int chosen){
+        if(generating)return;if(pending.Count>0&&!Persist())return;
+        if(puzzle.Placed.Count>0&&!puzzle.Won&&MessageBox.Show(this,"เริ่มกระดานใหม่หรือไม่? กระดานปัจจุบันจะถูกแทนที่", "เกมใหม่",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
+        generating=true;content.Enabled=false;side.Enabled=false;UseWaitCursor=true;status.Text="กำลังสร้าง "+names[chosen]+" · หน้าต่างยังตอบสนอง กรุณารอสักครู่";
+        try{var generated=await System.Threading.Tasks.Task.Run(()=>{var result=new Puzzle();result.New(sizes[chosen]);return result;});if(!IsDisposed&&!Disposing)ApplyNewPuzzle(chosen,generated);}
+        catch(Exception error){if(!IsDisposed)status.Text="สร้างโจทย์ไม่สำเร็จ: "+error.Message;}
+        finally{if(!IsDisposed){generating=false;content.Enabled=true;side.Enabled=true;UseWaitCursor=false;}}
+    }
+    SavedGame Snapshot(){return new SavedGame{Id=gameId.ToString(),Difficulty=level,ElapsedSeconds=completed?finishedSeconds:(long)(DateTime.Now-started).TotalSeconds,Completed=completed,RewardGranted=rewardGranted,Sound=soundOn,Scale=scale,Solution=puzzle.Solution.Select(r=>new SavedRectangle(r,0)).ToList(),Clues=puzzle.Clues.Select(c=>new SavedClue{X=c.Cell.X,Y=c.Cell.Y,Value=c.Value}).ToList(),Placed=puzzle.Placed.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList(),History=puzzle.History.Select(state=>state.Select(r=>new SavedRectangle(r.Bounds,r.Color)).ToList()).ToList(),Pending=pending.Select(p=>new PendingReward{Id=p.Id,Difficulty=p.Difficulty}).ToList()};}
+    bool Persist(){if(!initialized)return true;try{session.Save(Snapshot());lastSave=DateTime.Now;retrySave.Visible=pending.Count>0;return true;}catch(Exception error){status.Text="บันทึกเกมไม่สำเร็จ: "+error.Message;rewardMessage="รางวัลรอบันทึก · กดลองบันทึกใหม่";retrySave.Visible=true;return false;}}
+    void RetryRewards(){if(pending.Count==0)return;if(!Persist())return;foreach(var reward in pending.ToList()){try{playerProgress.Award(Guid.Parse(reward.Id),reward.Difficulty);pending.Remove(reward);if(reward.Id==gameId.ToString())rewardGranted=true;rewardMessage="+"+PlayerProgress.ExpRewards[reward.Difficulty]+" EXP · EXP รวม "+playerProgress.TotalExp.ToString("N0");}catch(Exception error){rewardMessage="รางวัลรอบันทึก: "+error.Message;status.Text=rewardMessage;break;}}Persist();retrySave.Visible=pending.Count>0;}
+    void LoadGame(){SavedGame saved=session.Load();if(saved==null){NewGame(0);if(session.Warning!=null)status.Text=session.Warning;return;}SessionStore.Restore(saved,puzzle);replaceLegacyMaster=puzzle.Clues.Any(c=>c.Value==1)||saved.Difficulty==4&&saved.Placed.Count==0&&puzzle.Solution.All(r=>r.Height==1)&&puzzle.Clues.GroupBy(c=>c.Cell.Y).Select(row=>string.Join(",",row.OrderBy(c=>c.Cell.X).Select(c=>c.Cell.X+":"+c.Value))).Distinct().Count()==1;gameId=Guid.Parse(saved.Id);level=saved.Difficulty;completed=saved.Completed&&puzzle.Won;finishedSeconds=saved.ElapsedSeconds;started=DateTime.Now-TimeSpan.FromSeconds(saved.ElapsedSeconds);rewardGranted=saved.RewardGranted;pending.AddRange(saved.Pending);scale=Math.Max(1,Math.Min(4,saved.Scale));soundOn=saved.Sound;sound.Text="เสียง: "+(soundOn?"เปิด":"ปิด");board.NextColor=puzzle.Placed.Count==0?0:puzzle.Placed.Max(r=>r.Color)+1;title.Text=names[level];for(int i=0;i<5;i++)levelButtons[i].BackColor=i==level?Color.FromArgb(222,240,228):Color.White;initialized=true;RefreshState();clock.Text=Elapsed();status.Text=session.Warning??"เล่นต่อจากกระดานที่บันทึกไว้";LayoutBoard();}
+    void CheckAnswer(){board.ShowErrors=true;board.Invalidate();RefreshState();int wrong=puzzle.Placed.Count(r=>!puzzle.Valid(r.Bounds));status.Text=wrong>0?"มี "+wrong+" รูปที่ยังไม่ถูกต้อง (กรอบแดง)":"สี่เหลี่ยมที่วางถูกต้องแล้ว · เหลือ "+(puzzle.Size*puzzle.Size-puzzle.Covered)+" ช่อง";}
+    void SetScale(float value){scale=Math.Max(1,Math.Min(4,value));board.CancelDrag();LayoutBoard();Persist();}
+    void LayoutBoard(){if(layingOut||viewport.ClientSize.Width<30||viewport.ClientSize.Height<30)return;layingOut=true;try{viewport.AutoScrollPosition=Point.Empty;int size=(int)(Math.Min(viewport.ClientSize.Width-28,viewport.ClientSize.Height-28)*scale);size=Math.Max(40,size);board.Size=new Size(size,size);board.Location=new Point(Math.Max(12,(viewport.ClientSize.Width-size)/2),Math.Max(12,(viewport.ClientSize.Height-size)/2));viewport.AutoScrollMinSize=new Size(size+24,size+24);viewport.AutoScrollPosition=new Point(Math.Max(0,(size+24-viewport.ClientSize.Width)/2),Math.Max(0,(size+24-viewport.ClientSize.Height)/2));scaleLabel.Text=(scale*100).ToString("0")+"%";minus.Enabled=scale>1;plus.Enabled=scale<4;exitFull.Location=new Point(Math.Max(4,viewport.ClientSize.Width-exitFull.Width-12),12);exitFull.BringToFront();board.Invalidate();}finally{layingOut=false;}}
+    void ToggleFull(){board.CancelDrag();if(!full){previousScale=scale;oldBorder=FormBorderStyle;oldState=WindowState;oldBounds=Bounds;full=true;header.Visible=side.Visible=top.Visible=bottom.Visible=false;content.Padding=Padding.Empty;WindowState=FormWindowState.Normal;FormBorderStyle=FormBorderStyle.None;Bounds=Screen.FromControl(this).Bounds;scale=1;exitFull.Visible=true;}else{full=false;exitFull.Visible=false;FormBorderStyle=oldBorder;Bounds=oldBounds;WindowState=oldState;header.Visible=side.Visible=top.Visible=bottom.Visible=true;content.Padding=new Padding(12);scale=previousScale;}LayoutBoard();}
+    void ShowWin(){if(!completed||!puzzle.Won||IsDisposed)return;using(var dialog=new Form{Text="สำเร็จ!",ClientSize=new Size(470,285),StartPosition=FormStartPosition.CenterParent,FormBorderStyle=FormBorderStyle.FixedDialog,MaximizeBox=false,MinimizeBox=false,BackColor=Color.White,Font=Font}){Label caption=new Label{Text="ยอดเยี่ยม! คุณทำสำเร็จแล้ว",Font=new Font("Segoe UI",16,FontStyle.Bold),ForeColor=Green,TextAlign=ContentAlignment.MiddleCenter,Dock=DockStyle.Top,Height=70};Label detail=new Label{Text=names[level]+" · "+puzzle.Size+" × "+puzzle.Size+" ช่อง\nเวลา "+Elapsed()+"\n"+rewardMessage,TextAlign=ContentAlignment.MiddleCenter,Dock=DockStyle.Top,Height=100};dialog.Controls.Add(detail);dialog.Controls.Add(caption);Button again=MakeButton("เล่นใหม่",()=>{dialog.DialogResult=DialogResult.Retry;dialog.Close();});again.SetBounds(125,188,220,36);dialog.Controls.Add(again);Button close=MakeButton("ดูกระดานที่เล่นจบ",()=>dialog.Close());close.SetBounds(125,232,220,32);dialog.Controls.Add(close);dialog.AcceptButton=again;if(dialog.ShowDialog(this)==DialogResult.Retry)RequestNewGame(level);}}
+    void ShowAchievements(){using(Form window=CreateAchievementWindow())window.ShowDialog(this);}
+    public Form CreateAchievementWindow(){
+        Form window=new Form{Text="Achievement · สถิติผู้เล่น",ClientSize=new Size(650,Math.Min(734,Screen.FromControl(this).WorkingArea.Height-100)),MinimumSize=new Size(480,360),StartPosition=FormStartPosition.CenterParent,BackColor=Color.FromArgb(237,242,237),Font=Font,MaximizeBox=false,AutoScaleMode=AutoScaleMode.Dpi};
+        Panel achievementBody=new Panel{Dock=DockStyle.Fill,AutoScroll=true};window.Controls.Add(achievementBody);
+        Label heading=new Label{Text="ACHIEVEMENT",Font=new Font("Segoe UI",22,FontStyle.Bold),ForeColor=Green,Location=new Point(24,20),Size=new Size(550,42)};achievementBody.Controls.Add(heading);
+        Label subtitle=new Label{Text="ทุกกระดานที่ชนะ คือความก้าวหน้าของคุณ",ForeColor=Muted,Location=new Point(26,68),Size=new Size(550,26)};achievementBody.Controls.Add(subtitle);
+        Panel summary=new Panel{BackColor=Color.White,Location=new Point(24,106),Size=new Size(578,112)};achievementBody.Controls.Add(summary);
+        Label totals=new Label{Text="Level "+playerProgress.LevelNumber+" · "+playerProgress.CurrentLevel.Name+"\nชนะ "+playerProgress.TotalWins.ToString("N0")+" กระดาน · "+playerProgress.TotalExp.ToString("N0")+" EXP",Font=new Font("Segoe UI",14,FontStyle.Bold),ForeColor=Green,Location=new Point(132,26),AutoSize=true};summary.Controls.Add(totals);string rankId=playerProgress.LevelNumber>=21?"divine":playerProgress.LevelNumber>=11?"professional":playerProgress.LevelNumber>=6?"skilled":"novice";AddRankPicture(summary,rankId,new Rectangle(6,6,100,100));
+        TableLayoutPanel table=new TableLayoutPanel{Location=new Point(24,234),Size=new Size(578,228),ColumnCount=3,RowCount=6,BackColor=Color.White,CellBorderStyle=TableLayoutPanelCellBorderStyle.Single};table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,40));table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,30));table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,30));
+        for(int row=0;row<6;row++)table.RowStyles.Add(new RowStyle(SizeType.Percent,100f/6));
+        string[] headers={"ระดับ / ขนาด","ชนะแล้ว","EXP ต่อกระดาน"};for(int col=0;col<3;col++)table.Controls.Add(new Label{Text=headers[col],Dock=DockStyle.Fill,TextAlign=ContentAlignment.MiddleCenter,ForeColor=Green,BackColor=Color.FromArgb(223,239,227)},col,0);
+        for(int row=0;row<5;row++){string[] values={names[row]+"  "+sizes[row]+" × "+sizes[row],playerProgress.Wins[row].ToString("N0")+" กระดาน","+"+PlayerProgress.ExpRewards[row].ToString("N0")+" EXP"};for(int col=0;col<3;col++)table.Controls.Add(new Label{Text=values[col],Dock=DockStyle.Fill,TextAlign=ContentAlignment.MiddleCenter,ForeColor=Green},col,row+1);}achievementBody.Controls.Add(table);
+        string levelText="Level "+playerProgress.LevelNumber+" · "+playerProgress.CurrentLevel.Name;
+        achievementBody.Controls.Add(new Label{Text=levelText+"\n"+playerProgress.ExpInLevel.ToString("N0")+" / 1,000 EXP · อีก "+playerProgress.ExpToNextLevel.ToString("N0")+" EXP ถึง Level ถัดไป",ForeColor=Muted,Location=new Point(26,478),Size=new Size(570,44)});
+        ProgressBar levelProgress=new ProgressBar{Location=new Point(26,526),Size=new Size(576,6),Maximum=1000,Value=(int)playerProgress.ExpInLevel};achievementBody.Controls.Add(levelProgress);
+        string[] rankIds={"novice","skilled","professional","divine"};string[] rankTitles={"มือใหม่","ผู้ชำนาญ","มืออาชีพ","เทพเจ้า"};string[] bands={"Level 1–5","Level 6–10","Level 11–20","Level 21+"};
+        var rankCards=new List<Panel>();for(int i=0;i<4;i++){Panel card=new Panel{Location=new Point(24+i*145,546),Size=new Size(140,124),BackColor=Color.White};AddRankPicture(card,rankIds[i],new Rectangle(29,0,82,82));card.Controls.Add(new Label{Text=rankTitles[i]+"\n"+bands[i],Location=new Point(0,84),Size=new Size(140,40),TextAlign=ContentAlignment.MiddleCenter,ForeColor=Green});achievementBody.Controls.Add(card);rankCards.Add(card);}
+        Button back=MakeButton("กลับไปเล่น",()=>window.Close());Panel footer=new Panel{Dock=DockStyle.Bottom,Height=54,Padding=new Padding(12)};back.Dock=DockStyle.Right;back.Width=174;footer.Controls.Add(back);window.Controls.Add(footer);achievementBody.BringToFront();achievementBody.AutoScrollMinSize=new Size(620,680);bool sizing=false;Action resizeAchievements=()=>{if(sizing)return;sizing=true;try{
+            int available=Math.Max(300,window.ClientSize.Width-48-SystemInformation.VerticalScrollBarWidth);
+            heading.Width=subtitle.Width=available;summary.Width=table.Width=available;
+            totals.AutoSize=false;totals.Size=new Size(Math.Max(120,available-144),82);totals.Font=new Font("Segoe UI",available<480?11:14,FontStyle.Bold);
+            foreach(Control item in achievementBody.Controls){if(item is Label&&item.Top==478)item.Width=available;}
+            levelProgress.Width=available;int columns=available<550?2:4,cardWidth=(available-8*(columns-1))/columns;
+            for(int i=0;i<rankCards.Count;i++){Panel card=rankCards[i];card.SetBounds(24+(i%columns)*(cardWidth+8),546+(i/columns)*132,cardWidth,124);foreach(Control child in card.Controls){if(child is PictureBox)child.Left=(cardWidth-child.Width)/2;else if(child is Label)child.Width=cardWidth;}}
+            achievementBody.AutoScrollMinSize=new Size(0,546+((4+columns-1)/columns)*132+12);
+        }finally{sizing=false;}};window.Resize+=(sender,args)=>resizeAchievements();resizeAchievements();window.AcceptButton=back;window.CancelButton=back;return window;
+    }
+    static void AddRankPicture(Control parent,string id,Rectangle bounds){
+        using(Stream stream=typeof(GameWindow).Assembly.GetManifestResourceStream("Shikaku.Rank."+id))using(Image original=Image.FromStream(stream)){
+            PictureBox picture=new PictureBox{Image=new Bitmap(original),Bounds=bounds,SizeMode=PictureBoxSizeMode.Zoom};
+            picture.Disposed+=(sender,args)=>picture.Image.Dispose();parent.Controls.Add(picture);
+        }
+    }
+    static MemoryStream CreateSound(){int rate=22050,count=(int)(rate*.20);MemoryStream stream=new MemoryStream();using(BinaryWriter writer=new BinaryWriter(stream,System.Text.Encoding.ASCII,true)){writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));writer.Write(36+count*2);writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVEfmt "));writer.Write(16);writer.Write((short)1);writer.Write((short)1);writer.Write(rate);writer.Write(rate*2);writer.Write((short)2);writer.Write((short)16);writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));writer.Write(count*2);for(int i=0;i<count;i++){double t=i/(double)rate;double value=Math.Sin(2*Math.PI*(t<.06?660:880)*t)*Math.Exp(-t*23)*.13;writer.Write((short)(value*32767));}}stream.Position=0;return stream;}
+    protected override void Dispose(bool disposing){if(disposing){timer.Dispose();player.Dispose();audio.Dispose();}base.Dispose(disposing);}
+}

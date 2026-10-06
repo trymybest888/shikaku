@@ -1,0 +1,6 @@
+﻿*.exe
+*.pdb
+tests/achievement-small.png
+tests/test-data-*/
+bin/
+obj/
